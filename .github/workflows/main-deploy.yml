@@ -31,4 +31,4 @@ jobs:
           
           # Directorio remoto: Dónde subirá los archivos en cPanel.
           # Ajusta esta ruta según tu configuración de hosting.
-          server-dir: /portafolio.rsanjur.com/
+          server-dir: /facturasapi.rsanjur.com/
