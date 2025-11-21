@@ -3,6 +3,8 @@ const { drizzle } = require('drizzle-orm/mysql2');
 const mysql = require('mysql2/promise');
 const { facturas } = require('./db/schema');
 const { eq } = require('drizzle-orm');
+const axios = require('axios');
+const cheerio = require('cheerio');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -122,27 +124,107 @@ app.delete('/api/facturas/:id', async (req, res) => {
   }
 });
 
-// Start server
-async function startServer() {
+app.post('/api/scrape-factura', async (req, res) => {
   try {
-    const { db, connection } = await initDatabase();
-    
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
-      console.log(`Database connected successfully`);
+    const { url } = req.body;
+
+    if (!url) {
+      return res.status(400).json({ error: 'La URL es requerida' });
+    }
+
+    const response = await axios.get(url);
+    const html = response.data;
+    const $ = cheerio.load(html);
+
+    // Extract Date
+    // The date is in the third col-sm-4 in the first panel heading
+    // Structure: .panel-heading .row .col-sm-4.text-right h5
+    const fecha = $('.panel-heading .row .col-sm-4.text-right h5').first().text().trim();
+
+    // Extract Issuer Info
+    let emisorNombre = '';
+    let emisorRuc = '';
+    let emisorDv = '';
+
+    $('.panel-default').each((i, el) => {
+      const heading = $(el).find('.panel-heading').text().trim();
+      if (heading.includes('EMISOR')) {
+        const body = $(el).find('.panel-body');
+        emisorRuc = body.find('dt:contains("RUC") + dd').text().trim();
+        emisorDv = body.find('dt:contains("DV") + dd').text().trim();
+        emisorNombre = body.find('dt:contains("NOMBRE") + dd').text().trim();
+      }
     });
 
-    // Handle graceful shutdown
-    process.on('SIGINT', async () => {
-      await connection.end();
-      console.log('Database connection closed');
-      process.exit(0);
+    // Extract Products
+    const productos = [];
+    $('#detalle table tbody tr').each((i, el) => {
+      const descripcion = $(el).find('td[data-title="Descripción"]').text().trim();
+      const cantidad = $(el).find('td[data-title="Cantidad"]').text().trim();
+      const precioUnitario = $(el).find('td[data-title="Precio"]').text().trim();
+      const descuento = $(el).find('td[data-title="Descuento"]').text().trim();
+      const precioTotal = $(el).find('td[data-title="Total"]').text().trim();
+
+      if (descripcion) {
+        productos.push({
+          descripcion,
+          cantidad,
+          precioUnitario,
+          descuento,
+          precioTotal
+        });
+      }
+    });
+
+    // Extract Totals
+    // Note: The text is inside a div inside the td, e.g. "Descuentos: <div>0.00</div>"
+    // We need to get the text of the div.
+    const descuentos = $('#detalle table tfoot td:contains("Descuentos:") div').text().trim();
+    const itbms = $('#detalle table tfoot td:contains("ITBMS Total:") div').text().trim();
+    const total = $('#detalle table tfoot td:contains("TOTAL PAGADO:") div').text().trim();
+
+    res.json({
+      fecha,
+      emisor: {
+        nombre: emisorNombre,
+        ruc: emisorRuc,
+        dv: emisorDv
+      },
+      productos,
+      descuentos,
+      itbms,
+      total
     });
 
   } catch (error) {
-    console.error('Failed to start server:', error);
-    process.exit(1);
+    console.error('Scraping error:', error);
+    res.status(500).json({ error: 'Error al procesar la factura: ' + error.message });
   }
+});
+
+// Start server
+async function startServer() {
+  let connection;
+  try {
+    const dbResult = await initDatabase();
+    connection = dbResult.connection;
+    console.log(`Database connected successfully`);
+  } catch (error) {
+    console.error('Warning: Database connection failed:', error.message);
+  }
+
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+
+  // Handle graceful shutdown
+  process.on('SIGINT', async () => {
+    if (connection) {
+      await connection.end();
+      console.log('Database connection closed');
+    }
+    process.exit(0);
+  });
 }
 
 startServer();
